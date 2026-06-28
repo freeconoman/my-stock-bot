@@ -6,19 +6,25 @@ from bs4 import BeautifulSoup
 import urllib.parse
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Quantum Trend Bot Pro", layout="wide")
-st.title("🤖 퀀텀 트렌드 봇 (백테스팅 내장 버전)")
+# 페이지 설정
+st.set_page_config(page_title="Quantum Trend Bot", layout="wide")
+st.title("🤖 퀀텀 트렌드 봇 (최종 안정화 버전)")
 
-# 1. 자체 계산 엔진 (Pandas-ta 의존성 제거)
+# 1. 계산 엔진 (순수 Pandas 기반)
 def apply_indicators(df):
-    # MA60
+    # 컬럼이 다중 인덱스인 경우 평탄화
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    
     df['MA60'] = df['Close'].rolling(window=60).mean()
+    
     # TRIX
     ema1 = df['Close'].ewm(span=9, adjust=False).mean()
     ema2 = ema1.ewm(span=9, adjust=False).mean()
     ema3 = ema2.ewm(span=9, adjust=False).mean()
     df['TRIX'] = (ema3 - ema3.shift(1)) / ema3.shift(1) * 10000
     df['TRIX_SIGNAL'] = df['TRIX'].rolling(window=9).mean()
+    
     # Stochastic
     low_min = df['Low'].rolling(window=14).min()
     high_max = df['High'].rolling(window=14).max()
@@ -32,7 +38,7 @@ def backtest(ticker, start, end):
     if len(df) < 100: return None
     df = apply_indicators(df)
     
-    # 전략: 약세장(Close < MA60) + 골든크로스 발생시 매수
+    # 매수 조건
     df['Signal'] = ((df['Close'] < df['MA60']) & 
                     (df['STOCH_K'].shift(1) < df['STOCH_D'].shift(1)) & (df['STOCH_K'] > df['STOCH_D']) &
                     (df['TRIX'].shift(1) < df['TRIX_SIGNAL'].shift(1)) & (df['TRIX'] > df['TRIX_SIGNAL'])).astype(int)
@@ -40,7 +46,7 @@ def backtest(ticker, start, end):
     trades = df[df['Signal'] == 1].copy()
     if trades.empty: return None
     
-    trades['Returns'] = df['Close'].pct_change(5).shift(-5) # 5일 보유 수익률 가정
+    trades['Returns'] = df['Close'].pct_change(5).shift(-5) 
     
     win_rate = (len(trades[trades['Returns'] > 0]) / len(trades)) * 100
     pl_ratio = trades[trades['Returns'] > 0]['Returns'].mean() / abs(trades[trades['Returns'] <= 0]['Returns'].mean())
@@ -48,21 +54,23 @@ def backtest(ticker, start, end):
     
     return win_rate, pl_ratio, cum_ret * 100
 
-# UI 구성
+# UI
 ticker = st.sidebar.text_input("종목 코드", "005930.KS")
-if st.sidebar.button("분석 및 백테스팅 시작"):
+if st.sidebar.button("분석 실행"):
     with st.spinner("데이터 분석 중..."):
-        # 1. 현재 상황 분석
         df_all = yf.download(ticker, period="1y", progress=False)
         df_all = apply_indicators(df_all)
+        
+        # ★ 핵심 수정: 데이터에서 단일 숫자(float)로 명확히 추출
         curr = df_all.iloc[-1]
+        curr_close = float(curr['Close'])
+        curr_ma60 = float(curr['MA60'])
         
         st.subheader("📊 현재 시장 진단")
-        is_weak = curr['Close'] < curr['MA60']
+        is_weak = curr_close < curr_ma60
         st.write(f"현재 60일선 위치: {'약세장(기법 유효)' if is_weak else '강세장(주의)'}")
         st.line_chart(df_all[['Close', 'MA60']].tail(120))
         
-        # 2. 백테스팅 결과
         st.subheader("📈 기간별 백테스팅 성과")
         periods = {
             "최근 1년": (datetime.now() - timedelta(days=365), datetime.now()),
