@@ -2,4 +2,5 @@ streamlit
 yfinance
 pandas
 pandas-ta
-googlesearch-python
+beautifulsoup4
+requests
