@@ -1,51 +1,69 @@
 import streamlit as st
 import yfinance as yf
 import pandas_ta as ta
-from googlesearch import search
 import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+import urllib.parse
 
-# 1. 웹 페이지 기본 레이아웃 구성
-st.set_page_config(page_title="Quantum Trend Bot", layout="wide")
+# 1. 웹 페이지 기본 설정
+st.set_page_config(page_title="Quantum Trend Bot", layout="wide", page_icon="🤖")
 st.title("🤖 퀀텀 트렌드 봇 (TRIX & 스토캐스틱 실전 모델)")
 st.caption("신창환 전문가의 약세장 역발상 추세 반전 기법 기반 시스템")
 
-# 2. 사이드바 제어판 (기존 코드명과 충돌 방지)
+# 2. 사이드바 제어판
 st.sidebar.header("🕹️ 관제 센터")
-target_ticker = st.sidebar.text_input("종목 코드 입력 (샘플: 삼성전자)", "005930.KS")
+target_ticker = st.sidebar.text_input("종목 코드 입력 (한국 종목은 끝에 .KS 또는 .KQ)", "005930.KS")
 lookback_period = st.sidebar.selectbox("데이터 조회 기간", ["3mo", "6mo", "1y"], index=1)
 
-# 3. 실시간 구글 웹 검색 엔진 (종목 뉴스 스크래핑)
-@st.cache_data(ttl=1800) # 30분간 검색 결과 캐싱으로 속도 최적화
+# 3. 자체 구글 웹 검색 엔진 (안정성 강화 버전)
+@st.cache_data(ttl=1800)
 def google_web_search(ticker_name):
     search_query = f"{ticker_name} 주가 전망 호재 악재 뉴스"
+    url = f"https://www.google.com/search?q={urllib.parse.quote(search_query)}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
     search_urls = []
+    
     try:
-        # 스트림릿 서버에서 안전하게 구글 검색결과 상위 4개 추출
-        for url in search(search_query, num_results=4):
-            search_urls.append(url)
+        res = requests.get(url, headers=headers)
+        soup = BeautifulSoup(res.text, "html.parser")
+        
+        # 구글 검색 결과에서 링크만 추출
+        for a in soup.find_all("a", href=True):
+            href = a['href']
+            # 실제 외부 연결 링크 필터링
+            if href.startswith("http") and "google" not in href:
+                if href not in search_urls:
+                    search_urls.append(href)
+            if len(search_urls) >= 4:
+                break
     except Exception as e:
-        return [f"검색 엔진 일시적 제한 (오류: {e})"]
-    return search_urls
+        return [f"검색 엔진 접근 지연 (사유: {e})"]
+        
+    return search_urls if search_urls else ["관련된 최신 뉴스를 찾지 못했습니다."]
 
 # 4. 주가 데이터 수집 및 기술적 지표 연산
 @st.cache_data
 def fetch_and_calculate_metrics(ticker, period):
-    df = yf.download(ticker, period=period)
+    df = yf.download(ticker, period=period, progress=False)
     if df.empty:
         return None
     
-    # 60일 이동평균선 (약세장/강세장 판별 기준)
+    # 60일 이동평균선
     df['MA60'] = df['Close'].rolling(window=60).mean()
     
-    # TRIX (9일 평활) 및 시그널선 계산
+    # TRIX 계산 (기본 9일 평활)
     df.ta.trix(length=9, append=True)
-    # pandas-ta의 TRIX 결과 컬럼명 대응 (TRIX_9_15.0 형태로 생성됨)
     trix_col = [col for col in df.columns if 'TRIX' in col]
+    
     if trix_col:
-        df['TRIX_SIGNAL'] = df[trix_col[0]].rolling(window=9).mean()
+        # TRIX의 9일 이동평균선을 시그널 선으로 설정
         df['TRIX_MAIN'] = df[trix_col[0]]
+        df['TRIX_SIGNAL'] = df['TRIX_MAIN'].rolling(window=9).mean()
         
-    # 스토캐스틱 (Slow 14, 3, 3)
+    # 스토캐스틱 계산
     df.ta.stoch(append=True)
     
     return df
@@ -53,74 +71,66 @@ def fetch_and_calculate_metrics(ticker, period):
 # 데이터 로드
 stock_df = fetch_and_calculate_metrics(target_ticker, lookback_period)
 
+# 5. 메인 대시보드 출력
 if stock_df is not None and 'TRIX_MAIN' in stock_df.columns:
-    # 당일(curr) 및 전일(prev) 데이터 추출
+    # 가장 최근 2일치 데이터
     curr_data = stock_df.iloc[-1]
     prev_data = stock_df.iloc[-2]
     
-    # 변수 평탄화 (Multi-index 대처용)
+    # 스토캐스틱 컬럼명 동적 추출 (pandas-ta 버전에 따른 오류 방지)
+    stoch_k_col = [c for c in stock_df.columns if 'STOCHk' in c][0]
+    stoch_d_col = [c for c in stock_df.columns if 'STOCHd' in c][0]
+    
+    # 데이터 추출 (단일 값으로 변환)
     curr_close = float(curr_data['Close'].iloc[0]) if isinstance(curr_data['Close'], pd.Series) else float(curr_data['Close'])
     curr_ma60 = float(curr_data['MA60'].iloc[0]) if isinstance(curr_data['MA60'], pd.Series) else float(curr_data['MA60'])
     
-    # 5. 핵심 기법 조건 검증 (신창환의 선행/후행 필터)
-    is_weak_market = curr_close < curr_ma60  # 60일선 아래 (약세장 체크)
+    # 기법 조건 판별식
+    is_weak_market = curr_close < curr_ma60  
     
-    # 스토캐스틱 골든크로스 여부
-    stoch_k_col = [c for c in stock_df.columns if 'STOCHk' in c][0]
-    stoch_d_col = [c for c in stock_df.columns if 'STOCHd' in c][0]
     stoch_golden = (prev_data[stoch_k_col] < prev_data[stoch_d_col]) and (curr_data[stoch_k_col] > curr_data[stoch_d_col])
-    
-    # TRIX 시그널 돌파 여부
     trix_golden = (prev_data['TRIX_MAIN'] < prev_data['TRIX_SIGNAL']) and (curr_data['TRIX_MAIN'] > curr_data['TRIX_SIGNAL'])
 
-    # 6. 화면 대시보드 레이아웃 구현
+    # 화면 레이아웃 (왼쪽 차트, 오른쪽 판정)
     layout_left, layout_right = st.columns([2, 1])
     
     with layout_left:
-        st.subheader("📈 실시간 추세 및 지표 차트")
-        # 차트 가시성을 위한 라인 구성
-        chart_data = stock_df[['Close', 'MA60']].copy()
-        st.line_chart(chart_data)
+        st.subheader("📈 가격 흐름 및 60일 이동평균선")
+        st.line_chart(stock_df[['Close', 'MA60']])
         
-        st.write("📊 **보조지표 현황 (최근 3일)**")
-        st.dataframe(stock_df[['Close', 'MA60', 'TRIX_MAIN', stoch_k_col]].tail(3))
+        st.write("📊 **주요 지표 상세 데이터 (최근 3일)**")
+        st.dataframe(stock_df[['Close', 'MA60', 'TRIX_MAIN', 'TRIX_SIGNAL', stoch_k_col]].tail(3))
 
     with layout_right:
         st.subheader("🎯 전략 판정 센터")
         
-        # 시장 환경 브리핑
         if is_weak_market:
-            st.error("⚠️ 현재 60일 이동평균선 아래: [약세장 상태]")
-            st.caption("기법 적용 가능 상태입니다. 지표의 크로스 순서를 모니터링하세요.")
-        else:
-            st.info("☀️ 현재 60일 이동평균선 위: [강세장 상태]")
-            st.caption("신창환 기법은 약세장 전용이므로 현재 구간에서는 신뢰도가 낮습니다.")
+            st.error("⚠️ [약세장 상태] 60일선 아래 위치")
+            st.caption("기법 적용 구간입니다. 지표 정렬을 확인합니다.")
+            st.markdown("---")
             
-        st.markdown("---")
-        
-        # 매매 시그널 출력 엔진
-        if is_weak_market:
-            if trix_golden and (stock_df[stoch_k_col].tail(5).max() > stock_df[stoch_d_col].tail(5).max()):
-                st.success("🔥 **[STRONG BUY] 강력 매수 신호 포착!**")
+            # 매수 로직 판정
+            if trix_golden and (stock_df[stoch_k_col].tail(3).max() > stock_df[stoch_d_col].tail(3).max()):
+                st.success("🔥 **[STRONG BUY] 강력 매수 신호!**\n\n스토캐스틱 상승과 TRIX 골든크로스가 완성되었습니다.")
                 st.balloons()
             elif stoch_golden:
-                st.warning("⏳ **[예비 신호] 스토캐스틱 골든크로스 완료**")
-                st.caption("TRIX가 시그널선을 뚫고 올라올 때까지 최종 진입을 대기하십시오.")
+                st.warning("⏳ **[예비 신호 발생]**\n\n스토캐스틱 골든크로스 완료. TRIX 시그널 돌파를 대기하세요.")
             else:
-                st.info("💤 **[WAIT] 조건 미충족 (관망 상태)**")
+                st.info("💤 **[관망] 진입 조건 미충족**")
         else:
-            st.info("💤 **[WAIT] 조건 미충족 (관망 상태)**")
+            st.info("☀️ [강세장 상태] 60일선 위 위치")
+            st.caption("신창환 기법은 약세장 전용이므로 현재 구간은 적용하지 않습니다.")
             
         st.markdown("---")
         
-        # 실시간 웹 검색 기반 뉴스 연동 기능
-        st.subheader("🌐 AI 웹 인텔리전스 (실시간 이슈)")
-        with st.spinner("구글 실시간 트렌드 분석 중..."):
+        # 실시간 뉴스 스크래핑
+        st.subheader("🌐 관련 실시간 뉴스 분석")
+        with st.spinner("최신 이슈를 검색 중입니다..."):
             web_feeds = google_web_search(target_ticker)
             for feed in web_feeds:
-                if "http" in feed:
-                    st.markdown(f"🔗 [실시간 정보 및 분석 링크]({feed})")
+                if feed.startswith("http"):
+                    st.markdown(f"🔗 [관련 뉴스 및 종목 리포트 보기]({feed})")
                 else:
                     st.caption(feed)
 else:
-    st.error("유효하지 않은 종목 코드이거나 데이터를 불러오지 못했습니다. (확인: 한국 종목은 .KS 혹은 .KQ를 붙여야 합니다.)")
+    st.error("데이터를 정상적으로 불러오지 못했습니다. 종목 코드가 올바른지 확인해 주세요. (예: 005930.KS)")
